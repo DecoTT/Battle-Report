@@ -1,0 +1,18 @@
+# Core dependencies
+opencv-python==4.8.1
+pytesseract==0.3.10
+easyocr==1.7.0
+pandas==2.1.0
+openpyxl==3.1.2
+mss==9.0.1
+pyautogui==0.9.54
+numpy==1.24.3
+Pillow==10.0.0
+customtkinter==5.2.0
+keyboard==0.13.5
+python-dateutil==2.8.2
+
+# Additional utilities
+scikit-image==0.21.0
+matplotlib==3.7.2
+colorama==0.4.6
