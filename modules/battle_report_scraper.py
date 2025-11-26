@@ -211,16 +211,15 @@ class InstanceTracker:
     UNKNOWN = None
 
     # Tolerancia vertical para considerar que dos detecciones son la misma card
-    # Aumentamos a 320 px para cubrir variaciones al hacer scroll entre frames
-    SAME_CARD_Y_TOLERANCE = 320
+    # Ajustada a 180 px para diferenciarlas según el nuevo parche
+    SAME_CARD_Y_TOLERANCE = 180
 
-    # Enfriamiento global por héroe (en segundos). Si se procesó recientemente,
-    # evitaremos re-clics rápidos del mismo héroe aunque se desplace en pantalla.
-    REPROCESS_COOLDOWN_S = 60
+    # Enfriamiento global eliminado; ya no se usa REPROCESS_COOLDOWN_S
+    # REPROCESS_COOLDOWN_S = 60
 
     # Tiempo durante el cual una card ya procesada bloquea re-clics aunque
-    # aparezca a una Y distinta. Esto previene duplicados en desplazamientos.
-    PROCESSED_LOCK_S = 45
+    # aparezca a una Y distinta. Ajustado a 15 s según el nuevo parche.
+    PROCESSED_LOCK_S = 15
 
     def __init__(self) -> None:
         # Mapa de instancias vistas. Llave: (hero_key, gametag_key)
@@ -232,9 +231,8 @@ class InstanceTracker:
         # Guarda el mínimo Y visto para determinar si necesitamos scroll agresivo
         self.min_y_seen: int = 99999
 
-        # Lleva registro de cuándo se procesó por última vez un héroe para
-        # aplicar el enfriamiento global y evitar clicks duplicados al hacer scroll.
-        self.last_processed_ts: Dict[str, float] = {}
+        # Se elimina last_processed_ts; no hay enfriamiento global en el parche actual
+        # self.last_processed_ts: Dict[str, float] = {}
 
     def _hero_key(self, hero_name: str) -> str:
         """Normaliza el nombre del héroe para usar como key."""
@@ -281,11 +279,7 @@ class InstanceTracker:
         """
         hero_key = self._hero_key(hero_name)
         now = time.time()
-        # Enfriamiento global: si acabamos de procesar este héroe, evitamos
-        # re-clics rápidos que ocurren cuando la misma card se desplaza por scroll.
-        last_ts = self.last_processed_ts.get(hero_key)
-        if last_ts and (now - last_ts) < self.REPROCESS_COOLDOWN_S:
-            return False
+        # Enfriamiento global eliminado: no se aplica en esta versión
         # Revisar si ya tenemos registrada una card para este héroe
         for (stored_hero, stored_tag), card in self.seen.items():
             if stored_hero != hero_key:
@@ -342,8 +336,7 @@ class InstanceTracker:
         # Registrar gametag en el set de gametags
         if normalized_tag:
             self.gametags.add(normalized_tag.lower())
-        # Actualizar el timestamp de última vez procesado para este héroe
-        self.last_processed_ts[hero_key] = now
+        # No se actualiza last_processed_ts porque se eliminó el enfriamiento global
 
     def needs_scroll(self) -> bool:
         """Indica si debemos forzar scroll agresivo."""
