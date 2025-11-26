@@ -1,7 +1,10 @@
 """
-Battle Report Scraper (tracker core)
-------------------------------------
+Battle Report Scraper Module
+Módulo para automatizar la captura de asistencia en reportes de batalla.
+Detecta héroes, capitanes prohibidos y genera reporte de participantes.
 
+Tracker core (persistencia por héroe + gametag)
+----------------------------------------------
 Implementa la persistencia de instancias por héroe + gametag.
 Evita marcar un héroe como "ya procesado" solo por coincidencia de nombre:
 se requiere que el gametag haya sido capturado para bloquear un nuevo click.
@@ -157,6 +160,18 @@ class InstanceTracker:
         """
 
         return self.max_y_processed > self.min_y_seen + 250
+
+
+class ImprovedInstanceTracker(InstanceTracker):
+    """
+    Alias para compatibilidad hacia atrás.
+
+    El repositorio previo exponía ``ImprovedInstanceTracker``; este alias
+    permite resolver conflictos de merge manteniendo la API esperada, pero la
+    lógica principal vive en ``InstanceTracker``.
+    """
+
+    pass
 
 
 # Punto de entrada seguro para que "python modules/battle_report_scraper.py"
