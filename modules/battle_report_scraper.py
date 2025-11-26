@@ -15,7 +15,7 @@ import json
 import hashlib  # 🆕 Para detectar cambios en contenido
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple, Optional, Set
 import winsound
 import threading
 from dataclasses import dataclass, field
@@ -186,137 +186,153 @@ class HeroInstance:
 
 @dataclass
 class SeenCard:
-    """Representa una card detectada en el battle report"""
-    gametag: Optional[str]
+    """Representa una card detectada en la cuadrícula."""
     hero_name: str
+    gametag: Optional[str]
     last_seen: float
     y_center: int
     processed: bool = False
 
 
-class ImprovedInstanceTracker:
+class InstanceTracker:
     """
-    Tracker mejorado basado en test_tracker_debug-v2.py que funciona al 100%
-    
-    MEJORAS SOBRE EL TRACKER ANTERIOR:
-    - Usa gametag como identificador principal
-    - Verifica posición Y en coordenadas de pantalla completa
-    - Lógica más simple: should_click() verifica TODO
-    - Basado en código que pasó pruebas reales exitosas
+    Persiste instancias por (héroe + gametag), no solo por héroe.
+
+    Reglas clave:
+    - Una detección sin gametag se registra como hero+UNKNOWN y *no* bloquea
+      otros intentos del mismo héroe.
+    - Cuando se captura el gametag, la entrada hero+UNKNOWN se fusiona en la
+      clave hero+gametag y se marca como procesada.
+    - Se evita re-clickear el mismo gametag ya procesado; nuevas detecciones
+      del mismo héroe con gametag distinto siguen siendo válidas.
     """
-    
-    def __init__(self):
-        """Inicializa el tracker"""
-        self.seen: Dict[str, SeenCard] = {}
-        self.gametags: set = set()
-        self.max_y_processed = 0
-        self.min_y_seen = 99999
-        # Almacena combinaciones de héroe+gametag procesadas para análisis
-        self.processed_pairs: set = set()
-    
-    def _key(self, hero_name: str) -> str:
-        """Genera key normalizada para el héroe"""
-        return hero_name.lower().strip()
-    
+
+    # Representación del valor UNKNOWN para el gametag
+    UNKNOWN = None
+
+    def __init__(self) -> None:
+        # Mapa de instancias vistas. Llave: (hero_key, gametag_key)
+        self.seen: Dict[Tuple[str, Optional[str]], SeenCard] = {}
+        # Conjunto de gametags procesados (normalizados) para estadísticas
+        self.gametags: Set[str] = set()
+        # Guarda el Y máximo procesado para ayudar con scroll
+        self.max_y_processed: int = 0
+        # Guarda el mínimo Y visto para determinar si necesitamos scroll agresivo
+        self.min_y_seen: int = 99999
+
+    def _hero_key(self, hero_name: str) -> str:
+        """Normaliza el nombre del héroe para usar como key."""
+        return hero_name.strip().lower()
+
+    def _gametag_key(self, gametag: Optional[str]) -> Optional[str]:
+        """Normaliza el gametag a minúsculas o retorna UNKNOWN si es None."""
+        return gametag.strip().lower() if gametag else self.UNKNOWN
+
+    def _key(self, hero_name: str, gametag: Optional[str]) -> Tuple[str, Optional[str]]:
+        """Genera una clave compuesta (hero_key, gametag_key)."""
+        return (self._hero_key(hero_name), self._gametag_key(gametag))
+
+    # --- Registro de detecciones ---
+    def add_detection(self, hero_name: str, y_center: int) -> None:
+        """
+        Registra una card vista sin gametag (hero+UNKNOWN).
+
+        - Actualiza el "min_y_seen" para saber desde dónde empezamos a ver cards.
+        - Si la card ya existía, solo refresca la última vez y su Y.
+        """
+        now = time.time()
+        # Actualizar el mínimo Y visto para scroll
+        self.min_y_seen = min(self.min_y_seen, y_center)
+        key = self._key(hero_name, None)
+        card = self.seen.get(key)
+        if not card:
+            # Primera vez que vemos esta card sin gametag
+            self.seen[key] = SeenCard(hero_name=hero_name, gametag=None, last_seen=now, y_center=y_center)
+        else:
+            # Solo actualizar última vez vista y posición
+            card.last_seen = now
+            card.y_center = y_center
+
+    # --- Lógica de decisión para procesar ---
     def should_process(self, hero_name: str, y_center: int) -> bool:
         """
-        Determina si debe procesarse una card.
+        Devuelve True solo si debemos abrir la card.
 
-        La lógica original utilizaba el gametag del héroe para saltar
-        duplicados, lo cual provocaba que héroes con el mismo nombre pero
-        diferentes jugadores se omitieran. Para evitar este problema,
-        eliminamos la verificación basada en el gametag y únicamente
-        consideramos la distancia vertical respecto a la última posición
-        procesada. De esta forma, se permitirá procesar varias
-        instancias del mismo héroe a lo largo del reporte siempre que
-        estén suficientemente separadas verticalmente.
-
-        Args:
-            hero_name: Nombre del héroe.
-            y_center: Coordenada Y del centro de la card (en pantalla completa).
-
-        Returns:
-            True si debe procesarse la card, False en caso contrario.
+        - Solo bloquea cuando ya hay *un gametag procesado* para ese héroe en
+          la misma zona Y (misma card).
+        - Las entradas hero+UNKNOWN nunca bloquean; sirven solo para mergear
+          al capturar el gametag.
         """
-        key = self._key(hero_name)
-        card = self.seen.get(key)
-
-        # Si ya hemos procesado una instancia y la nueva card está
-        # demasiado cerca verticalmente, la omitimos. Esto evita clicks
-        # repetidos sobre la misma card al hacer scroll lento.
-        if card and card.processed and y_center < self.max_y_processed + 180:
-            return False
-
-        # En cualquier otro caso procesamos la card.
+        hero_key = self._hero_key(hero_name)
+        for (stored_hero, stored_tag), card in self.seen.items():
+            if stored_hero != hero_key:
+                continue
+            # Si ya procesamos una card para este héroe con gametag real y
+            # la nueva detección está cerca en Y, no procesamos de nuevo.
+            if (
+                card.processed
+                and stored_tag is not self.UNKNOWN
+                and abs(y_center - card.y_center) < 160
+            ):
+                return False
         return True
-    
-    def add_detection(self, hero_name: str, y_center: int):
+
+    # --- Confirmación de procesado ---
+    def mark_processed(self, hero_name: str, y_center: int, gametag: Optional[str]) -> None:
         """
-        Registra que vimos un héroe (sin procesarlo todavía)
-        
-        Args:
-            hero_name: Nombre del héroe
-            y_center: Coordenada Y del centro
+        Marca la card como procesada y persiste por hero+gametag.
+
+        - Si existía hero+UNKNOWN, se fusiona con la nueva clave hero+gametag.
+        - El gametag se normaliza en minúsculas para deduplicar.
+        - Guarda el Y máximo procesado para ayudar al scroll.
         """
-        key = self._key(hero_name)
         now = time.time()
-        
-        # Actualizar mínimo Y visto
-        self.min_y_seen = min(self.min_y_seen, y_center)
-        
-        if key not in self.seen:
-            # Primera vez que vemos este héroe
-            self.seen[key] = SeenCard(None, hero_name, now, y_center)
+        hero_key = self._hero_key(hero_name)
+        # Normalizar el gametag si existe
+        normalized_tag = gametag.strip() if gametag else None
+        # Eliminar/recuperar la entrada hero+UNKNOWN para este héroe
+        unknown_key = (hero_key, self.UNKNOWN)
+        unknown_card = self.seen.pop(unknown_key, None)
+        # Generar clave definitiva hero+gametag
+        key = self._key(hero_name, normalized_tag)
+        card = self.seen.get(key)
+        if not card:
+            # Si no existía, creamos una nueva usando datos de unknown si había
+            base = unknown_card or SeenCard(hero_name=hero_name, gametag=None, last_seen=now, y_center=y_center)
+            card = SeenCard(
+                hero_name=base.hero_name,
+                gametag=normalized_tag,
+                last_seen=now,
+                y_center=y_center,
+                processed=True,
+            )
+            self.seen[key] = card
         else:
-            # Actualizar última vez visto y posición
-            self.seen[key].last_seen = now
-            self.seen[key].y_center = y_center
-    
-    def mark_processed(self, hero_name: str, y_center: int, gametag: Optional[str] = None):
-        """
-        Marca una card como procesada
-        
-        Args:
-            hero_name: Nombre del héroe
-            y_center: Coordenada Y del centro
-            gametag: Gametag capturado (puede ser None si falló)
-        """
-        # Primero registrar la detección
-        self.add_detection(hero_name, y_center)
-        
-        key = self._key(hero_name)
-        self.seen[key].processed = True
-        self.seen[key].gametag = gametag
-        
-        # Actualizar máximo Y procesado
+            # Ya existe la entrada, solo actualizar datos y marcar como procesada
+            card.gametag = normalized_tag
+            card.last_seen = now
+            card.y_center = y_center
+            card.processed = True
+        # Actualizar el máximo Y procesado
         self.max_y_processed = max(self.max_y_processed, y_center)
-        
-        # Agregar gametag al set si existe
-        if gametag:
-            self.gametags.add(gametag)
-            # Registrar combinación héroe+gametag para análisis
-            pair_id = f"{hero_name.lower().strip()}+{gametag.lower().strip()}"
-            self.processed_pairs.add(pair_id)
-    
+        # Registrar gametag en el set de gametags
+        if normalized_tag:
+            self.gametags.add(normalized_tag.lower())
+
     def needs_scroll(self) -> bool:
-        """
-        Determina si necesita scroll agresivo
-        
-        Returns:
-            True si ya procesó algo y hay contenido arriba
-        """
+        """Indica si debemos forzar scroll agresivo."""
         return self.max_y_processed > self.min_y_seen + 250
-    
-    def reset(self):
-        """Resetea el tracker"""
+
+    def reset(self) -> None:
+        """Resetea el tracker a estado limpio."""
         self.seen.clear()
         self.gametags.clear()
         self.max_y_processed = 0
         self.min_y_seen = 99999
         print("🔄 ImprovedInstanceTracker reseteado")
-    
-    def get_stats(self) -> dict:
-        """Retorna estadísticas del tracker"""
+
+    def get_stats(self) -> Dict[str, object]:
+        """Retorna estadísticas del tracker para UI/reporte."""
         return {
             'active_instances': len(self.seen),
             'processed_heroes': len([c for c in self.seen.values() if c.processed]),
@@ -325,6 +341,17 @@ class ImprovedInstanceTracker:
             'max_y_processed': self.max_y_processed,
             'min_y_seen': self.min_y_seen
         }
+
+
+class ImprovedInstanceTracker(InstanceTracker):
+    """
+    Alias para compatibilidad hacia atrás.
+
+    El repositorio previo exponía ``ImprovedInstanceTracker``; este alias
+    permite resolver conflictos de merge manteniendo la API esperada, pero la
+    lógica principal vive en ``InstanceTracker``.
+    """
+    pass
 
 
 @dataclass
