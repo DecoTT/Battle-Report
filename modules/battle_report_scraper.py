@@ -906,12 +906,12 @@ class BattleReportScraper:
             processed_screens += 1
             
             # Límite de seguridad - si no hay progreso por muchas iteraciones
-            if no_progress_count > 10:
-                self.log("⚠️ Sin progreso después de 10 intentos, posible fin del reporte")
+            if no_progress_count > 80:
+                self.log("⚠️ Sin progreso después de 80 intentos, posible fin del reporte")
                 break
             
             # Límite de seguridad general
-            if processed_screens > 50:
+            if processed_screens > 150:
                 self.log("Límite de pantallas alcanzado")
                 break
         
@@ -1730,6 +1730,115 @@ class BattleReportScraper:
     def run(self):
         """Ejecuta la aplicación"""
         self.root.mainloop()
+
+# === NUEVO TRACKER POR CENTROIDE ===
+@dataclass
+class Track:
+    """Estado de seguimiento para una card (centroide + historial)."""
+    track_id: int
+    hero_key: str
+    y_center: int
+    last_seen: float
+    gametag: Optional[str] = None
+    processed: bool = False
+
+class InstanceTracker:
+    """
+    Tracker con matching por centroide (tipo SORT simplificado en 1D).
+
+    - Persiste por héroe+gametag, pero mantiene IDs de tracking para seguir
+      la misma card aunque se desplace hacia arriba en el scroll.
+    - Un match se calcula con distancia Euclidiana en Y entre centroides, y
+      sólo se permite "retroceso" mínimo (el scroll siempre sube las cards).
+    - Las detecciones UNKNOWN no bloquean; sólo cuando se captura el gametag
+      se marca la pista como procesada.
+    """
+    UNKNOWN = None
+    MATCH_MAX_DIST = 160
+    BACKSLIDE_TOLERANCE = 35
+    STALE_TRACK_S = 12
+    def __init__(self) -> None:
+        self.tracks: Dict[int, Track] = {}
+        self.gametags: Set[str] = set()
+        self.max_y_processed: int = 0
+        self.min_y_seen: int = 99999
+        self._next_id: int = 1
+    def _hero_key(self, hero_name: str) -> str:
+        return hero_name.strip().lower()
+    def _match_track(self, hero_key: str, y_center: int, register: bool) -> Optional[Track]:
+        now = time.time()
+        stale_ids = [tid for tid, t in self.tracks.items() if now - t.last_seen > self.STALE_TRACK_S]
+        for tid in stale_ids:
+            self.tracks.pop(tid, None)
+        best_id = None
+        best_dist = 99999
+        for tid, track in self.tracks.items():
+            if track.hero_key != hero_key:
+                continue
+            if y_center > track.y_center + self.BACKSLIDE_TOLERANCE:
+                continue
+            dist = abs(y_center - track.y_center)
+            if dist < best_dist and dist <= self.MATCH_MAX_DIST:
+                best_dist = dist
+                best_id = tid
+        if best_id is not None:
+            track = self.tracks[best_id]
+            track.y_center = y_center
+            track.last_seen = now
+            return track
+        if not register:
+            return None
+        track_id = self._next_id
+        self._next_id += 1
+        track = Track(track_id=track_id, hero_key=hero_key, y_center=y_center, last_seen=now)
+        self.tracks[track_id] = track
+        return track
+    def add_detection(self, hero_name: str, y_center: int) -> None:
+        self.min_y_seen = min(self.min_y_seen, y_center)
+        hero_key = self._hero_key(hero_name)
+        self._match_track(hero_key, y_center, register=True)
+    def should_process(self, hero_name: str, y_center: int) -> bool:
+        hero_key = self._hero_key(hero_name)
+        track = self._match_track(hero_key, y_center, register=False)
+        if track and track.processed:
+            return False
+        return True
+    def mark_processed(self, hero_name: str, y_center: int, gametag: Optional[str]) -> None:
+        now = time.time()
+        hero_key = self._hero_key(hero_name)
+        normalized_tag = gametag.strip() if gametag else None
+        track = self._match_track(hero_key, y_center, register=True)
+        if not track:
+            return
+        track.gametag = normalized_tag
+        track.last_seen = now
+        track.y_center = y_center
+        track.processed = True
+        self.max_y_processed = max(self.max_y_processed, y_center)
+        if normalized_tag:
+            self.gametags.add(normalized_tag.lower())
+    def needs_scroll(self) -> bool:
+        return self.max_y_processed > self.min_y_seen + 250
+    def reset(self) -> None:
+        self.tracks.clear()
+        self.gametags.clear()
+        self.max_y_processed = 0
+        self.min_y_seen = 99999
+        self._next_id = 1
+        print("🔄 ImprovedInstanceTracker reseteado")
+    def get_stats(self) -> Dict[str, object]:
+        return {
+            'active_instances': len(self.tracks),
+            'processed_heroes': len([t for t in self.tracks.values() if t.processed]),
+            'unique_gametags': len(self.gametags),
+            'gametags': sorted(list(self.gametags)),
+            'max_y_processed': self.max_y_processed,
+            'min_y_seen': self.min_y_seen
+        }
+
+class ImprovedInstanceTracker(InstanceTracker):
+    """Alias para compatibilidad hacia atrás."""
+    pass
 
 if __name__ == "__main__":
     app = BattleReportScraper()
