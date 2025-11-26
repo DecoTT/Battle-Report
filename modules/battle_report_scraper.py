@@ -379,39 +379,102 @@ class ImprovedInstanceTracker(InstanceTracker):
 
 
 class BrokenArmourDetector:
-    """Detects the broken-armor badge on a card using template matching."""
+    """
+    Detects the broken‑armour badge (red smith icon) on a card using template matching.
 
-    # Default template filenames; these live in the ``templates`` directory.
+    This detector loads one or more template images and attempts to match them
+    against card crops. When a match score exceeds the configured threshold,
+    the card is considered to contain the broken armour icon. Debug output
+    is printed for template loading and matching to aid in troubleshooting.
+    """
+
+    # Template filenames expected to live in the assets/templates or templates directories
     TEMPLATE_FILENAMES: Tuple[str, str] = ("broken_armour.jpg", "broken_armour1.jpg")
 
-    def __init__(self, assets_dir: Path | str = Path("templates"), threshold: float = 0.82) -> None:
+    def __init__(self, assets_dir: Path | str = Path("assets/templates"), threshold: float = 0.7) -> None:
+        """
+        Parameters
+        ----------
+        assets_dir : Path or str, optional
+            Base directory where broken armour templates reside. Defaults to
+            ``assets/templates`` to align with the location of other template
+            assets in the project. When loading templates the detector will
+            search this directory first, then fallback to ``assets/templates``
+            and ``templates``.
+        threshold : float, optional
+            Match threshold in the range [0, 1]. A match is considered valid
+            when the normalized cross‑correlation score meets or exceeds this
+            value. Defaults to 0.7.
+        """
         self.assets_dir = Path(assets_dir)
         self.threshold = threshold
         self.templates: List[np.ndarray] = []
         self.load_templates()
 
     def load_templates(self) -> None:
-        """Loads armour templates if they exist, keeping the detector optional."""
+        """
+        Loads armour templates if they exist, keeping the detector optional.
 
+        The detector attempts to find templates in multiple candidate directories,
+        starting with the user‑supplied ``assets_dir``. It falls back to
+        ``assets/templates`` and ``templates`` to provide flexibility in
+        deployment. If templates are found, they are loaded and a debug
+        message is printed with their path and shape. When no templates are
+        discovered a warning is printed.
+        """
         self.templates.clear()
-        for name in self.TEMPLATE_FILENAMES:
-            img_path = self.assets_dir / name
-            if not img_path.exists():
+        # Candidate directories to search for the templates. Use a set to
+        # prevent loading the same directory more than once.
+        candidate_dirs: List[Path] = [self.assets_dir, Path("assets/templates"), Path("templates")]
+        seen_dirs: Set[Path] = set()
+        for base in candidate_dirs:
+            base = Path(base)
+            if base in seen_dirs:
                 continue
-            template = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
-            if template is not None:
-                self.templates.append(template)
+            seen_dirs.add(base)
+            for name in self.TEMPLATE_FILENAMES:
+                img_path = base / name
+                if not img_path.exists():
+                    continue
+                template = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+                if template is not None:
+                    self.templates.append(template)
+                    # Print debug info about loaded templates for troubleshooting
+                    print(f"✅ BrokenArmour template loaded: {img_path} (shape={template.shape})")
+        if not self.templates:
+            print(f"⚠️ BrokenArmourDetector: no templates found in {candidate_dirs}")
 
     def has_broken_armour(self, card_image: np.ndarray) -> bool:
-        """Returns True when the red smith icon is present on the provided card image."""
+        """
+        Returns True when the red smith icon is present on the provided card
+        image.
 
+        Parameters
+        ----------
+        card_image : np.ndarray
+            The cropped image of a card to be inspected.
+
+        Returns
+        -------
+        bool
+            True if a broken armour badge is detected based on the matching
+            threshold, otherwise False.
+        """
+        # Without templates, there is no detection capability
         if not self.templates:
             return False
-
+        best_score = 0.0
+        # Evaluate each loaded template against the card image
         for tmpl in self.templates:
             res = cv2.matchTemplate(card_image, tmpl, cv2.TM_CCOEFF_NORMED)
-            if np.any(res >= self.threshold):
+            max_val = float(res.max())
+            best_score = max(best_score, max_val)
+            if max_val >= self.threshold:
+                # Print debug info when a match meets or exceeds the threshold
+                print(f"🛠️ BrokenArmour match: {max_val:.2f} ≥ {self.threshold:.2f}")
                 return True
+        # Uncomment below for verbose scoring of non‑matches
+        # print(f"[BrokenArmour] max score={best_score:.2f} < thr={self.threshold:.2f}")
         return False
 
 
@@ -537,6 +600,14 @@ class BattleReportScraper:
         self.template_matcher.config['multi_scale']['max_scale'] = 1.1
         self.template_matcher.config['multi_scale']['scale_step'] = 0.05
         print("✅ TemplateMatcher configured: threshold=0.78, multi-scale=ON")
+
+        # Broken armour detector (red smith icon)
+        # Configure to load templates from the project's assets/templates folder
+        # and use a higher threshold (0.7) for more reliable detection.
+        self.broken_armour_detector = BrokenArmourDetector(
+            assets_dir=Path("assets/templates"),
+            threshold=0.7,
+        )
         
         self.scroll_controller = ScrollController()
         self.config_manager = ConfigManager()
@@ -900,7 +971,7 @@ class BattleReportScraper:
                     pyautogui.moveTo(center_x, center_y)
                     time.sleep(0.2)
                     pyautogui.scroll(-5)  # 🔧 FIX: Era -3, ahora -5
-                    time.sleep(0.5)
+                    time.sleep(0.2)
                     return True
             except Exception as e:
                 self.log(f"⚠️ Error en template matching: {e}")
@@ -909,8 +980,8 @@ class BattleReportScraper:
             # Hacer scroll down - Mover mouse al centro antes de scroll
             pyautogui.moveTo(center_x, center_y)
             time.sleep(0.1)
-            pyautogui.scroll(-10)  # 🔧 FIX: Era -5, ahora -10 (2x más rápido)
-            time.sleep(0.5)
+            pyautogui.scroll(-50)  # 🔧 FIX: Era -10, ahora -50 (2x más rápido)
+            time.sleep(0.3)
         
         self.log(f"❌ No se encontró el marcador después de {max_scrolls} scrolls")
         return False
@@ -958,7 +1029,7 @@ class BattleReportScraper:
             if cards_found == 0:
                 # No se encontraron cards en absoluto
                 self.log("⚠️ No se encontraron cards, haciendo scroll pequeño...")
-                pyautogui.scroll(-30)  # 🔧 FIX: Era -3, ahora -30 (10x más rápido)
+                pyautogui.scroll(-40)  # 🔧 FIX: Era -3, ahora -40 (10x más rápido)
                 time.sleep(0.5)
                 no_progress_count += 1
             elif cards_processed == 0:
@@ -968,7 +1039,7 @@ class BattleReportScraper:
                 if not content_changed:
                     self.log(f"⚠️ Contenido estancado, scroll MUY AGRESIVO...")
                     pyautogui.scroll(-60)  # 🔧 FIX: Era -20, ahora -60 (3x más rápido)
-                    time.sleep(1.2)
+                    time.sleep(0.7)
                     no_progress_count += 1
                 # 🔧 FIX: Scroll más agresivo para avanzar más rápido
                 elif self.instance_tracker.needs_scroll():
@@ -976,30 +1047,30 @@ class BattleReportScraper:
                     scroll_amount = -50  # 🔧 FIX: Era -15, ahora -50
                     self.log(f"⏭️ Todas las cards ya procesadas ({cards_found} saltadas), scroll AGRESIVO...")
                     pyautogui.scroll(scroll_amount)
-                    time.sleep(1)
+                    time.sleep(0.5)
                     no_progress_count += 1
                 else:
                     scroll_amount = -40  # 🔧 FIX: Era -12, ahora -40
                     self.log(f"⏭️ Todas las cards ya procesadas ({cards_found} saltadas), avanzando...")
                     pyautogui.scroll(scroll_amount)
-                    time.sleep(1)
+                    time.sleep(0.5)
                     no_progress_count += 1
             else:
                 # Se procesaron algunas cards nuevas
                 self.log(f"✅ Procesadas {cards_processed} de {cards_found} cards")
-                pyautogui.scroll(-25)  # 🔧 FIX: Era -8, ahora -25 (3x más rápido)
-                time.sleep(1)
+                pyautogui.scroll(-40)  # 🔧 FIX: Era -25, ahora -40 (3x más rápido)
+                time.sleep(0.5)
                 no_progress_count = 0  # Reset del contador
                 
             processed_screens += 1
             
-            # Límite de seguridad - si no hay progreso por muchas iteraciones
+            # Límite de seguridad - si no hay progreso por muchas iteraciones 100
             if no_progress_count > 100:
                 self.log("⚠️ Sin progreso después de 100 intentos, posible fin del reporte")
                 break
             
-            # Límite de seguridad general
-            if processed_screens > 250:
+            # Límite de seguridad general 150 pantallas
+            if processed_screens > 150:
                 self.log("Límite de pantallas alcanzado")
                 break
         
@@ -1036,7 +1107,8 @@ class BattleReportScraper:
                 break
             
             # process_card retorna True si procesó, False si saltó
-            was_processed = self.process_card(card_name, card_type, position)
+            # Pass the log_area screenshot into process_card so it can extract the card image
+            was_processed = self.process_card(card_name, card_type, position, screenshot)
             if was_processed:
                 processed_count += 1
             
@@ -1046,6 +1118,48 @@ class BattleReportScraper:
         
         # Retornar (total_encontradas, realmente_procesadas)
         return len(all_cards), processed_count
+
+    def extract_card_image(
+        self,
+        log_area: np.ndarray,
+        abs_pos: Tuple[int, int],
+        card_type: str,
+    ) -> Optional[np.ndarray]:
+        """
+        Extracts an approximate subimage of a card from the log area based on its
+        absolute position. The resulting image covers the entire card plus a small
+        margin to include the broken armour icon when present.
+
+        Args:
+            log_area: The cropped screenshot of the log area.
+            abs_pos: Absolute (x, y) position of the detected card.
+            card_type: 'hero' or 'captain' to choose sizing.
+
+        Returns:
+            A copy of the subimage for the card, or None if the crop is invalid.
+        """
+        rel_x = abs_pos[0] - self.LOG_REGISTER_AREA['left']
+        rel_y = abs_pos[1] - self.LOG_REGISTER_AREA['top']
+
+        h, w = log_area.shape[:2]
+
+        if card_type == "hero":
+            cw, ch = self.CARD_WIDTH, self.CARD_HEIGHT
+        else:
+            # Captains are slightly smaller
+            cw = int(self.CARD_WIDTH * 0.7)
+            ch = int(self.CARD_HEIGHT * 0.8)
+
+        # Small margin to fully include the icon
+        x1 = max(0, rel_x - 5)
+        y1 = max(0, rel_y - 5)
+        x2 = min(w, rel_x + cw + 5)
+        y2 = min(h, rel_y + ch + 5)
+
+        if x1 >= x2 or y1 >= y2:
+            return None
+
+        return log_area[y1:y2, x1:x2].copy()
         
     def detect_cards(self, screenshot, templates, card_type):
         """
@@ -1294,64 +1408,89 @@ class BattleReportScraper:
         # Convertir de vuelta al formato original
         return [(c['name'], c['type'], c['position'], c['confidence']) for c in keep]
 
-    def process_card(self, card_name, card_type, position):
-        """Procesa una card detectada - con instance tracking para héroes"""
+    def process_card(self, card_name, card_type, position, screenshot):
+        """Processes a detected card, using instance tracking for heroes.
+
+        Args:
+            card_name: The template name of the detected card (hero or captain).
+            card_type: Either 'hero' or 'captain'.
+            position: Absolute (x, y) coordinates of the card on screen.
+            screenshot: The cropped log area from which templates were matched.
+        """
         x, y = position
+
+        # Attempt to extract the card image from the log area for broken armour detection
+        card_image = None
+        if hasattr(self, "broken_armour_detector") and screenshot is not None:
+            try:
+                card_image = self.extract_card_image(screenshot, position, card_type)
+            except Exception:
+                card_image = None
         
-        # PARA HÉROES: Usar instance tracker mejorado
+        # HEROES: use improved instance tracker
         if card_type == "hero":
-            # ⚠️ IMPORTANTE: x, y ya son coordenadas ABSOLUTAS (convertidas en detect_cards)
-            # NO sumar offset otra vez
-            screen_x = x  # 🎯 FIX: Ya son absolutas
-            screen_y = y  # 🎯 FIX: Ya son absolutas
-            
-            # Calcular centro Y de la card para el tracker
-            y_center = screen_y + 25  # Centro de la card
-            
-            # === VERIFICAR SI DEBEMOS PROCESAR ===
-            if not self.instance_tracker.should_process(card_name, y_center):
-                self.log(f"⏭️  SKIP: {card_name} @ Y={y_center} (ya procesado o gametag capturado)")
-                # Registrar detección aunque no procesemos
+            # Coordinates are already absolute; no offset needed
+            screen_x = x
+            screen_y = y
+
+            # Approximate centre Y of the card for the tracker
+            y_center = screen_y + 25
+
+            # Broken armour detection: force processing if the icon is present
+            has_broken_armour = False
+            if card_image is not None and self.broken_armour_detector:
+                try:
+                    has_broken_armour = self.broken_armour_detector.has_broken_armour(card_image)
+                except Exception as e:
+                    self.log(f"⚠️ Error in BrokenArmourDetector: {e}")
+
+            # Check whether we should process; skip unless broken armour forces it
+            if not has_broken_armour and not self.instance_tracker.should_process(card_name, y_center):
+                self.log(f"⏭️  SKIP: {card_name} @ Y={y_center} (already processed or gametag captured)")
+                # Register detection even if we skip
                 self.instance_tracker.add_detection(card_name, y_center)
                 return False
-            
-            self.log(f"📍 Detectado héroe: {card_name} en posición absoluta ({x}, {y})")
-            
-            # Click en el centro de la card (25px offset como en el test)
+
+            if has_broken_armour:
+                self.log(f"🛠️ Broken armour detected on {card_name} @ Y={y_center} → forcing click")
+
+            self.log(f"📍 Detected hero: {card_name} at absolute position ({x}, {y})")
+
+            # Click at the centre of the card (25px offset)
             click_x = screen_x + 25
             click_y = screen_y + 25
             self.click_at(click_x, click_y)
-            time.sleep(5)
-            
-            # Capturar gametag
+            time.sleep(3.5)
+
+            # Capture gametag
             gametag = self.capture_gametag()
-            
-            # Marcar como procesado con el gametag capturado
+
+            # Mark as processed with the captured gametag
             self.instance_tracker.mark_processed(card_name, y_center, gametag)
-            
+
             if gametag:
-                self.log(f"✅ Gametag capturado: {gametag}")
-                
-                # Registrar participante
+                self.log(f"✅ Gametag captured: {gametag}")
+
+                # Register participant
                 if gametag not in self.participants:
                     self.participants[gametag] = Participant(name=gametag)
                 self.participants[gametag].hero_detected = True
                 self.participants[gametag].position = (x, y)
-                
-                # Actualizar UI
+
+                # Update UI
                 self.update_participant_display(gametag)
             else:
-                self.log(f"⚠️ No se pudo capturar gametag")
-                
-            # Cerrar ventana de héroe
-            self.log(f"Cerrando ventana de héroe...")
+                self.log(f"⚠️ Unable to capture gametag")
+
+            # Close hero window
+            self.log("Closing hero window...")
             self.click_at(*self.CLOSE_HERO_POS)
             time.sleep(0.2)
-            # Regresar mouse al área de log
+            # Return mouse to log area
             log_center_x = 490 + (934 - 490) // 2
             log_center_y = 441 + (821 - 441) // 2
             pyautogui.moveTo(log_center_x, log_center_y)
-            self.log(f"🖱️ Mouse regresado al área de log ({log_center_x}, {log_center_y})")
+            self.log(f"🖱️ Mouse returned to log area ({log_center_x}, {log_center_y})")
             time.sleep(0.2)
             
         elif card_type == "captain":
@@ -1430,24 +1569,41 @@ class BattleReportScraper:
                 img = np.array(screenshot)
                 img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
                 
-                # GUARDAR IMÁGENES PARA DEBUG
+                # DEBUG IMAGES
                 debug_dir = Path("debug_ocr")
                 debug_dir.mkdir(exist_ok=True)
                 timestamp = datetime.now().strftime("%H%M%S")
-                
-                # Guardar imagen original
+
+                # Save original image
                 debug_original = debug_dir / f"gametag_{timestamp}_original.jpg"
                 cv2.imwrite(str(debug_original), img)
-                
-                # Guardar imagen preprocesada
+
+                # Preprocess and save processed image
                 processed_img = self.ocr_engine.preprocess_image(img)
                 debug_processed = debug_dir / f"gametag_{timestamp}_processed.jpg"
                 cv2.imwrite(str(debug_processed), processed_img)
-                
-                self.log(f"💾 Debug: {debug_original.name}, {debug_processed.name}")
-                
-                # OCR para extraer texto con threshold muy bajo para capturar todo
-                results = self.ocr_engine.extract_text(img, confidence_threshold=0.0)
+
+                # Use the OCR engine helper to crop before the star/level template
+                star_template = Path("templates/star.jpg")
+                cropped_img, star_x, star_confidence = self.ocr_engine.crop_before_template(
+                    processed_img, star_template, threshold=0.55
+                )
+
+                # Save cropped image if a crop occurred
+                debug_files = [debug_original.name, debug_processed.name]
+                if star_x is not None:
+                    debug_cropped = debug_dir / f"gametag_{timestamp}_cropped.jpg"
+                    cv2.imwrite(str(debug_cropped), cropped_img)
+                    debug_files.append(debug_cropped.name)
+                    self.log(
+                        f"✂️  Cropped before star at x={star_x} (conf: {star_confidence:.2f})"
+                    )
+
+                # Log debug filenames
+                self.log(f"💾 Debug: {', '.join(debug_files)}")
+
+                # OCR to extract text with low threshold to capture everything
+                results = self.ocr_engine.extract_text(cropped_img, confidence_threshold=0.0)
                 
                 # Debug: mostrar todos los resultados
                 if results:
