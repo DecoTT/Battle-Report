@@ -18,43 +18,72 @@ class SeenCard:
     y_center: int
     processed: bool = False
 
+
 class PerfectCardTracker:
+    """Persiste por combinación héroe+gametag para evitar falsos 'procesado'."""
+
+    UNKNOWN = None
+
     def __init__(self):
-        self.seen: dict[str, SeenCard] = {}
+        # Llave: (hero_key, gametag_key)
+        self.seen: dict[tuple[str, str | None], SeenCard] = {}
         self.gametags: set[str] = set()
         self.max_y_processed = 0
         self.min_y_seen = 99999
 
-    def _key(self, hero_name: str) -> str:
+    def _hero_key(self, hero_name: str) -> str:
         return hero_name.lower().strip()
 
+    def _key(self, hero_name: str, gametag: str | None) -> tuple[str, str | None]:
+        return (self._hero_key(hero_name), gametag.lower().strip() if gametag else self.UNKNOWN)
+
     def should_click(self, hero_name: str, y_center: int) -> bool:
-        key = self._key(hero_name)
-        card = self.seen.get(key)
-        if card and card.gametag and card.gametag in self.gametags:
-            return False
-        if card and card.processed and y_center < self.max_y_processed + 180:
-            return False
+        hero_key = self._hero_key(hero_name)
+        for (stored_hero, _), card in self.seen.items():
+            if stored_hero != hero_key:
+                continue
+            if card.gametag and card.gametag.lower() in self.gametags:
+                return False
+            if card.processed and y_center < self.max_y_processed + 180:
+                return False
         return True
 
     def add_detection(self, hero_name: str, y_center: int):  # ← MOVIDO AQUÍ
-        key = self._key(hero_name)
+        key = self._key(hero_name, None)
         now = time.time()
         self.min_y_seen = min(self.min_y_seen, y_center)
-        if key not in self.seen:
+        card = self.seen.get(key)
+        if not card:
             self.seen[key] = SeenCard(None, hero_name, now, y_center)
         else:
-            self.seen[key].last_seen = now
-            self.seen[key].y_center = y_center
+            card.last_seen = now
+            card.y_center = y_center
 
     def mark_processed(self, hero_name: str, y_center: int, gametag: str | None):
+        # Registrar detección desconocida y luego consolidar con gametag real
         self.add_detection(hero_name, y_center)  # ← SIEMPRE registrar
-        key = self._key(hero_name)
-        self.seen[key].processed = True
-        self.seen[key].gametag = gametag
+        hero_key = self._hero_key(hero_name)
+        normalized_tag = gametag.strip() if gametag else None
+
+        # Fusionar la entrada UNKNOWN con la real
+        unknown_key = (hero_key, self.UNKNOWN)
+        unknown_card = self.seen.pop(unknown_key, None)
+
+        key = self._key(hero_name, normalized_tag)
+        card = self.seen.get(key)
+        if not card:
+            base = unknown_card or SeenCard(None, hero_name, time.time(), y_center)
+            card = SeenCard(normalized_tag, base.hero_name, time.time(), y_center, True)
+            self.seen[key] = card
+        else:
+            card.gametag = normalized_tag
+            card.last_seen = time.time()
+            card.y_center = y_center
+            card.processed = True
+
         self.max_y_processed = max(self.max_y_processed, y_center)
-        if gametag:
-            self.gametags.add(gametag)
+        if normalized_tag:
+            self.gametags.add(normalized_tag.lower())
 
     def needs_scroll(self) -> bool:
         return self.max_y_processed > self.min_y_seen + 250
