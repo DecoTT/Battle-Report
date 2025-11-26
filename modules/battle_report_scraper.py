@@ -15,7 +15,7 @@ import json
 import hashlib  # 🆕 Para detectar cambios en contenido
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import List, Dict, Tuple, Optional, Set
+from typing import List, Dict, Tuple, Optional, Set, Callable
 import winsound
 import threading
 from dataclasses import dataclass, field
@@ -30,7 +30,7 @@ try:
     WIN32_AVAILABLE = True
 except ImportError:
     WIN32_AVAILABLE = False
-    print("⚠️ Módulo 'win32api' no disponible. Instala con: pip install pywin32")
+    print("⚠️ 'win32api' module not available. Install with: pip install pywin32")
 
 # Intentar importar keyboard para el listener de ESC
 try:
@@ -38,8 +38,8 @@ try:
     KEYBOARD_AVAILABLE = True
 except ImportError:
     KEYBOARD_AVAILABLE = False
-    print("⚠️ Módulo 'keyboard' no disponible. Instala con: pip install keyboard")
-    print("   Sin esto, no podrás detener con ESC durante la captura.")
+    print("⚠️ 'keyboard' module not available. Install with: pip install keyboard")
+    print("   Without this, you won't be able to stop with ESC during capture.")
 
 # Configurar ruta de Tesseract si existe
 try:
@@ -49,7 +49,7 @@ try:
         pytesseract.pytesseract.tesseract_cmd = tesseract_path
         print(f"✅ Tesseract configurado: {tesseract_path}")
     else:
-        print("⚠️ Tesseract no encontrado en la ruta por defecto")
+        print("⚠️ Tesseract not found at the default path")
 except ImportError:
     pass
 
@@ -63,7 +63,7 @@ try:
     )
 except ImportError as e:
     print(f"Error importando módulos core: {e}")
-    print("Asegúrate de que los módulos core estén en la carpeta correcta")
+    print("Make sure the core modules are in the correct folder")
     # Intentar importación alternativa
     try:
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -72,7 +72,7 @@ except ImportError as e:
             ConfigManager, ScrollDirection
         )
     except ImportError:
-        print("No se pudieron importar los módulos core. Verifica la estructura de directorios.")
+        print("Could not import core modules. Check the directory structure.")
         sys.exit(1)
 
 # ===================================================================
@@ -348,7 +348,7 @@ class InstanceTracker:
         self.gametags.clear()
         self.max_y_processed = 0
         self.min_y_seen = 99999
-        print("🔄 ImprovedInstanceTracker reseteado")
+        print("🔄 ImprovedInstanceTracker reset")
 
     def get_stats(self) -> Dict[str, object]:
         """Retorna estadísticas del tracker para UI/reporte."""
@@ -371,6 +371,94 @@ class ImprovedInstanceTracker(InstanceTracker):
     lógica principal vive en ``InstanceTracker``.
     """
     pass
+
+
+# ---------------------------------------------------------------------------
+# Broken armour detection (red smith icon) so we always capture damaged gear
+# ---------------------------------------------------------------------------
+
+
+class BrokenArmourDetector:
+    """Detects the broken-armor badge on a card using template matching."""
+
+    # Default template filenames; these live in the ``templates`` directory.
+    TEMPLATE_FILENAMES: Tuple[str, str] = ("broken_armour.jpg", "broken_armour1.jpg")
+
+    def __init__(self, assets_dir: Path | str = Path("templates"), threshold: float = 0.82) -> None:
+        self.assets_dir = Path(assets_dir)
+        self.threshold = threshold
+        self.templates: List[np.ndarray] = []
+        self.load_templates()
+
+    def load_templates(self) -> None:
+        """Loads armour templates if they exist, keeping the detector optional."""
+
+        self.templates.clear()
+        for name in self.TEMPLATE_FILENAMES:
+            img_path = self.assets_dir / name
+            if not img_path.exists():
+                continue
+            template = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+            if template is not None:
+                self.templates.append(template)
+
+    def has_broken_armour(self, card_image: np.ndarray) -> bool:
+        """Returns True when the red smith icon is present on the provided card image."""
+
+        if not self.templates:
+            return False
+
+        for tmpl in self.templates:
+            res = cv2.matchTemplate(card_image, tmpl, cv2.TM_CCOEFF_NORMED)
+            if np.any(res >= self.threshold):
+                return True
+        return False
+
+
+class BrokenArmourWorkflow:
+    """Helper to click and classify any card that shows the broken armour icon."""
+
+    def __init__(
+        self,
+        detector: BrokenArmourDetector,
+        click_card: Callable[[Tuple[int, int]], None],
+        read_hero_gametag: Callable[[], Optional[str]],
+        read_captain_name: Callable[[], Optional[str]],
+        register_hero: Callable[[str], None],
+        register_captain: Callable[[str], None],
+    ) -> None:
+        self.detector = detector
+        self.click_card = click_card
+        self.read_hero_gametag = read_hero_gametag
+        self.read_captain_name = read_captain_name
+        self.register_hero = register_hero
+        self.register_captain = register_captain
+
+    def handle_card(self, card_image: np.ndarray, card_center: Tuple[int, int]) -> bool:
+        """
+        Clicks and classifies a card that has the broken armour badge.
+
+        The card is clicked, then both hero gametag and captain name readers are
+        attempted so the card is registered regardless of its type.
+        Returns True when a broken-armour card was processed.
+        """
+
+        if not self.detector.has_broken_armour(card_image):
+            return False
+
+        self.click_card(card_center)
+
+        gametag = self.read_hero_gametag()
+        if gametag:
+            self.register_hero(gametag)
+            return True
+
+        captain_name = self.read_captain_name()
+        if captain_name:
+            self.register_captain(captain_name)
+            return True
+
+        return True
 
 
 @dataclass
@@ -448,7 +536,7 @@ class BattleReportScraper:
         self.template_matcher.config['multi_scale']['min_scale'] = 0.9
         self.template_matcher.config['multi_scale']['max_scale'] = 1.1
         self.template_matcher.config['multi_scale']['scale_step'] = 0.05
-        print("✅ TemplateMatcher configurado: threshold=0.78, multi-scale=ON")
+        print("✅ TemplateMatcher configured: threshold=0.78, multi-scale=ON")
         
         self.scroll_controller = ScrollController()
         self.config_manager = ConfigManager()
@@ -513,12 +601,12 @@ class BattleReportScraper:
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill=tk.X, pady=10)
         
-        self.start_btn = ttk.Button(control_frame, text="INICIAR CAPTURA", 
+        self.start_btn = ttk.Button(control_frame, text="START CAPTURE", 
                                    command=self.start_capture,
                                    style="Success.TButton")
         self.start_btn.pack(side=tk.LEFT, padx=5)
         
-        self.stop_btn = ttk.Button(control_frame, text="DETENER", 
+        self.stop_btn = ttk.Button(control_frame, text="STOP", 
                                   command=self.stop_capture,
                                   state=tk.DISABLED,
                                   style="Danger.TButton")
@@ -527,7 +615,7 @@ class BattleReportScraper:
         ttk.Button(control_frame, text="Fine Tuning Grid", 
                   command=self.open_grid_tuning).pack(side=tk.LEFT, padx=20)
         
-        ttk.Button(control_frame, text="Gestionar Assets", 
+        ttk.Button(control_frame, text="Manage Assets", 
                   command=self.open_asset_manager).pack(side=tk.LEFT, padx=5)
         
         # Panel de progreso
@@ -571,15 +659,15 @@ class BattleReportScraper:
         action_frame = ttk.Frame(main_frame)
         action_frame.pack(fill=tk.X, pady=10)
         
-        ttk.Button(action_frame, text="Exportar JSON", 
+        ttk.Button(action_frame, text="Export JSON", 
                   command=self.export_json).pack(side=tk.LEFT, padx=5)
-        ttk.Button(action_frame, text="Exportar CSV", 
+        ttk.Button(action_frame, text="Export CSV", 
                   command=self.export_csv).pack(side=tk.LEFT, padx=5)
         ttk.Button(action_frame, text="Copiar Resultado", 
                   command=self.copy_result).pack(side=tk.LEFT, padx=5)
         
         # Status bar
-        self.status_var = tk.StringVar(value="Listo")
+        self.status_var = tk.StringVar(value="Ready")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN)
         status_bar.pack(fill=tk.X)
         
@@ -591,20 +679,20 @@ class BattleReportScraper:
     def load_assets(self):
         """Carga los assets de héroes y capitanes usando TemplateMatcher"""
         # === CAMBIO CRÍTICO: Usar TemplateMatcher como en test_tracker_debug ===
-        print("🔄 Cargando assets con TemplateMatcher...")
+        print("🔄 Loading assets with TemplateMatcher...")
         
         # Cargar héroes con TemplateMatcher
         self.heroes = self.template_matcher.load_templates_from_directory("heroes")
-        print(f"✅ Cargados {len(self.heroes)} héroes: {list(self.heroes.keys())}")
+        print(f"✅ Loaded {len(self.heroes)} heroes: {list(self.heroes.keys())}")
         
         # Cargar capitanes con TemplateMatcher
         self.captains = self.template_matcher.load_templates_from_directory("captains")
-        print(f"✅ Cargados {len(self.captains)} capitanes: {list(self.captains.keys())}")
+        print(f"✅ Loaded {len(self.captains)} captains: {list(self.captains.keys())}")
                     
         # Cargar assets especiales
         self.load_special_assets()
         
-        self.log(f"Cargados {len(self.heroes)} héroes y {len(self.captains)} capitanes")
+        self.log(f"Loaded {len(self.heroes)} heroes and {len(self.captains)} captains")
         
     def load_special_assets(self):
         """Carga assets especiales como el marcador de tropas y dragones"""
@@ -906,12 +994,12 @@ class BattleReportScraper:
             processed_screens += 1
             
             # Límite de seguridad - si no hay progreso por muchas iteraciones
-            if no_progress_count > 80:
-                self.log("⚠️ Sin progreso después de 80 intentos, posible fin del reporte")
+            if no_progress_count > 100:
+                self.log("⚠️ Sin progreso después de 100 intentos, posible fin del reporte")
                 break
             
             # Límite de seguridad general
-            if processed_screens > 150:
+            if processed_screens > 250:
                 self.log("Límite de pantallas alcanzado")
                 break
         
